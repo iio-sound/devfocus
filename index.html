@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DevFocus: Flow State</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+    <style>
+        :root { 
+            --bg: #0d1117; 
+            --text: #c9d1d9; 
+            --dim: #8b949e; 
+            --accent: #58a6ff;
+            --log-source: #79c0ff; /* Blue for Source */
+            --log-note: #d2a8ff;   /* Purple for Notes */
+            --btn-border: #30363d;
+        }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: var(--bg); font-family: 'Fira Code', 'Consolas', monospace; overflow: hidden; color: var(--text); }
+        
+        #app { display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; position: relative; z-index: 10; gap: 40px; }
+        
+        /* --- Timer Input Style --- */
+        .timer-container { position: relative; display: flex; flex-direction: column; align-items: center; margin-bottom: 20px; }
+        
+        #timer-input {
+            font-size: 6rem; font-weight: 700; color: var(--text);
+            background: transparent; border: none; outline: none;
+            text-align: center; width: 450px; font-family: inherit;
+            border-bottom: 2px solid transparent; transition: border-color 0.3s;
+            cursor: text;
+        }
+        #timer-input:focus { border-bottom: 2px solid var(--accent); }
+        
+        /* --- Button Group --- */
+        .controls { display: flex; gap: 20px; z-index: 20; }
+        
+        button {
+            background: transparent; border: 1px solid var(--btn-border); color: var(--accent);
+            padding: 15px 30px; font-size: 1rem; cursor: pointer; transition: all 0.2s ease;
+            font-family: inherit; border-radius: 6px; text-transform: uppercase; letter-spacing: 1.5px;
+            min-width: 160px; background: rgba(13, 17, 23, 0.8); /* Slight bg for readability over logs */
+        }
+        button:hover { border-color: var(--accent); background: rgba(88, 166, 255, 0.1); }
+        button:active { transform: translateY(1px); }
+        
+        button.primary-active { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: bold; }
+        button.primary-active:hover { background: #79c0ff; border-color: #79c0ff; }
+
+        /* --- Terminal Log Stack (Restored) --- */
+        #log-container {
+            position: absolute; bottom: 30px; left: 30px; /* Left aligned like the screenshot */
+            width: 500px; height: 250px;
+            overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end;
+            pointer-events: none; opacity: 0; transition: opacity 1s; 
+            font-size: 0.85rem; line-height: 1.6;
+            mask-image: linear-gradient(to bottom, transparent, black 20%); /* Fade out top logs */
+            -webkit-mask-image: linear-gradient(to bottom, transparent, black 20%);
+        }
+        .log-entry { 
+            color: var(--dim); white-space: nowrap; 
+            animation: slideUp 0.3s ease-out forwards; 
+        }
+        .log-ts { opacity: 0.5; margin-right: 10px; font-size: 0.8rem; }
+        .log-src { color: var(--log-source); font-weight: bold; margin-right: 5px; }
+        .log-note { color: var(--log-note); }
+
+        /* --- Visual Feedback --- */
+        #halo {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 1px; height: 1px; border-radius: 50%;
+            box-shadow: 0 0 0 0 rgba(88, 166, 255, 0.1); transition: box-shadow 0.1s; z-index: 0;
+        }
+
+        @keyframes slideUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 0.8; transform: translateY(0); } }
+    </style>
+</head>
+<body>
+
+    <div id="halo"></div>
+    
+    <div id="app">
+        <div class="timer-container">
+            <input type="text" id="timer-input" value="25:00" spellcheck="false">
+        </div>
+
+        <div class="controls">
+            <button id="toggle-btn">START FOCUS</button>
+            <button id="reset-btn">RESET</button>
+        </div>
+    </div>
+
+    <div id="log-container"></div>
+
+    <script>
+        // --- System State ---
+        const STATE = {
+            isPlaying: false,
+            timerInterval: null,
+            timeLeft: 25 * 60,
+            originalTime: 25 * 60
+        };
+
+        const timerInput = document.getElementById('timer-input');
+        const toggleBtn = document.getElementById('toggle-btn');
+        const resetBtn = document.getElementById('reset-btn');
+        const logContainer = document.getElementById('log-container');
+        const halo = document.getElementById('halo');
+
+        // --- Audio Engine ---
+        let padSynth, modularSynth, noise, filter, reverb, delay;
+
+        async function initAudio() {
+            await Tone.start();
+            
+            // Soft Filter Chain
+            filter = new Tone.Filter(1000, "lowpass").toDestination();
+            reverb = new Tone.Reverb({ decay: 12, wet: 0.5 }).connect(filter);
+            delay = new Tone.PingPongDelay({ delayTime: "8n.", feedback: 0.2, wet: 0.3 }).connect(reverb);
+
+            // Instruments
+            padSynth = new Tone.PolySynth(Tone.Synth, {
+                oscillator: { type: "sine" },
+                envelope: { attack: 2, decay: 3, sustain: 0.6, release: 5 }
+            }).connect(delay);
+            padSynth.volume.value = -12;
+
+            modularSynth = new Tone.PolySynth(Tone.FMSynth, {
+                harmonicity: 3, modulationIndex: 5,
+                envelope: { attack: 0.01, decay: 0.3, sustain: 0, release: 0.3 }
+            }).connect(reverb);
+            modularSynth.volume.value = -18;
+
+            noise = new Tone.Noise("pink").connect(filter);
+            noise.volume.value = -48; 
+            noise.start();
+
+            // Sequencer
+            const scale = ["C3", "E3", "G3", "B3", "D4", "F#4", "A4"]; 
+            const loopIds = ["LOOP_ALPHA", "LOOP_BETA", "LOOP_GAMMA", "LOOP_DELTA"];
+
+            // Pad Layer
+            new Tone.Loop(time => {
+                if (Math.random() < 0.6) {
+                    const note = scale[Math.floor(Math.random() * scale.length)];
+                    padSynth.triggerAttackRelease(note, "1n", time);
+                    
+                    // Log Formatting
+                    Tone.Draw.schedule(() => {
+                        addLog("LOOP_PAD", note, 0.5);
+                        pulseHalo(false);
+                    }, time);
+                }
+            }, "7n").start(0);
+
+            // Modular Layer
+            new Tone.Loop(time => {
+                if (Math.random() < 0.4) {
+                    const rawNote = scale[Math.floor(Math.random() * scale.length)];
+                    const octaveNote = Tone.Frequency(rawNote).transpose(12);
+                    
+                    modularSynth.triggerAttackRelease(octaveNote, "32n", time);
+                    
+                    // Log Formatting (Ensure actual note name is displayed)
+                    Tone.Draw.schedule(() => {
+                        const noteName = octaveNote.toNote(); // Fix: Convert Frequency to String
+                        const loopName = loopIds[Math.floor(Math.random() * loopIds.length)];
+                        addLog(loopName, noteName, 0.4 + Math.random() * 0.2);
+                        pulseHalo(true);
+                    }, time);
+                }
+            }, "8n").start(0);
+        }
+
+        // --- Timer Logic ---
+        function formatTime(seconds) {
+            const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+            const s = (seconds % 60).toString().padStart(2, '0');
+            return `${m}:${s}`;
+        }
+
+        function parseTimeInput(str) {
+            const parts = str.split(':');
+            if (parts.length === 1) return parseInt(parts[0]) * 60;
+            if (parts.length === 2) return parseInt(parts[0]) * 60 + parseInt(parts[1]);
+            return 25 * 60; 
+        }
+
+        function startTimer() {
+            if (!STATE.isPlaying && STATE.timeLeft === STATE.originalTime) {
+                const val = parseTimeInput(timerInput.value);
+                if (!isNaN(val) && val > 0) {
+                    STATE.originalTime = val;
+                    STATE.timeLeft = val;
+                }
+            }
+
+            STATE.timerInterval = setInterval(() => {
+                STATE.timeLeft--;
+                timerInput.value = formatTime(STATE.timeLeft);
+                if (STATE.timeLeft <= 0) finishSession();
+            }, 1000);
+
+            toggleBtn.innerText = "PAUSE"; 
+            toggleBtn.classList.add('primary-active');
+            timerInput.readOnly = true;
+            logContainer.style.opacity = 1; // Show Logs
+            
+            STATE.isPlaying = true;
+            
+            if(!padSynth) initAudio().then(() => Tone.Transport.start());
+            else Tone.Transport.start();
+
+            addLog("SYSTEM", "Focus_Session_Started", 1.0);
+        }
+
+        function pauseTimer() {
+            clearInterval(STATE.timerInterval);
+            Tone.Transport.pause();
+            if(padSynth) padSynth.releaseAll();
+
+            toggleBtn.innerText = "RESUME FOCUS";
+            toggleBtn.classList.remove('primary-active');
+            timerInput.readOnly = false;
+            logContainer.style.opacity = 0.3; // Dim Logs
+            
+            STATE.isPlaying = false;
+            addLog("SYSTEM", "Session_Paused", 0.0);
+        }
+
+        function resetTimer() {
+            pauseTimer();
+            STATE.timeLeft = STATE.originalTime;
+            timerInput.value = formatTime(STATE.originalTime);
+            toggleBtn.innerText = "START FOCUS";
+            Tone.Transport.stop();
+            logContainer.innerHTML = ""; // Clear logs
+            addLog("SYSTEM", "Timer_Reset", 0.0);
+        }
+
+        function finishSession() {
+            pauseTimer();
+            toggleBtn.innerText = "START FOCUS";
+            timerInput.readOnly = false;
+            STATE.timeLeft = STATE.originalTime;
+            timerInput.value = formatTime(STATE.originalTime);
+
+            // [옵션 1] 레트로 레벨업 사운드
+            const synth = new Tone.Synth({
+                oscillator: { type: "triangle" }, // 부드러운 게임 사운드
+                envelope: { attack: 0.01, decay: 0.1, sustain: 0, release: 0.1 }
+            }).toDestination();
+
+            const now = Tone.now();
+            synth.volume.value = -10;
+            // 도 - 미 - 솔 - 높은도 (빠르게)
+            synth.triggerAttackRelease("C5", "16n", now);
+            synth.triggerAttackRelease("E5", "16n", now + 0.1);
+            synth.triggerAttackRelease("G5", "16n", now + 0.2);
+            synth.triggerAttackRelease("C6", "8n",  now + 0.3);
+            
+            addLog("SYSTEM", "Session_Complete", 1.0);
+        }
+
+        // --- Log Stack Logic (The Requested Feature) ---
+        function addLog(source, note, vol) {
+            const div = document.createElement('div');
+            div.className = 'log-entry';
+            
+            const now = new Date();
+            const ts = `[${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}.${String(now.getMilliseconds()).padStart(3,'0')}]`;
+            
+            // HTML Formatting to match screenshot colors
+            div.innerHTML = `<span class="log-ts">${ts}</span> <span class="log-src">${source}</span> :: emit(<span class="log-note">${note}</span>) vol:${vol.toFixed(2)}`;
+            
+            logContainer.appendChild(div);
+            
+            // Keep strictly 12 lines max
+            if (logContainer.children.length > 12) {
+                logContainer.removeChild(logContainer.firstChild);
+            }
+        }
+
+        function pulseHalo(isStrong) {
+            const size = isStrong ? "100px" : "50px";
+            const opacity = isStrong ? "0.15" : "0.05";
+            halo.style.boxShadow = `0 0 ${size} ${size} rgba(88, 166, 255, ${opacity})`;
+            setTimeout(() => { halo.style.boxShadow = `0 0 0 0 rgba(88, 166, 255, 0)`; }, 1000);
+        }
+
+        // --- Events ---
+        toggleBtn.addEventListener('click', () => STATE.isPlaying ? pauseTimer() : startTimer());
+        resetBtn.addEventListener('click', resetTimer);
+        timerInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                timerInput.blur();
+                if (!STATE.isPlaying) startTimer();
+            }
+        });
+    </script>
+</body>
+</html>
